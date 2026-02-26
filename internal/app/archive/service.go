@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"mime"
+	"net/http"
 	"path"
 	"path/filepath"
 	"strings"
@@ -130,6 +131,19 @@ func (s *Service) Execute(ctx context.Context, req Request) (*Result, error) {
 	}
 	log.Printf("archive: file status=%d requestedID=%s", fileRes.StatusCode, req.RequestedID)
 
+	if forwardRangeToUpstream && fileRes.StatusCode == http.StatusOK {
+		_ = fileRes.Body.Close()
+		log.Printf("archive: upstream ignored range, refetching full body requestedID=%s", req.RequestedID)
+		fileRes, err = s.file.FetchFile(ctx, info.FileURL, cloneHeaders(info.Headers))
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return nil, err
+			}
+			return nil, &StatusError{Status: 502, Message: "failed to refetch full file"}
+		}
+		log.Printf("archive: refetch file status=%d requestedID=%s", fileRes.StatusCode, req.RequestedID)
+	}
+
 	if fileRes.StatusCode < 200 || fileRes.StatusCode >= 300 {
 		return &Result{
 			StatusCode: fileRes.StatusCode,
@@ -228,8 +242,8 @@ func (s *Service) Execute(ctx context.Context, req Request) (*Result, error) {
 		ContentType:         contentType,
 		FileName:            name,
 		CacheControl:        "public, max-age=2592000, immutable",
-		ForwardAcceptRange:  fileRes.Headers.Get("Accept-Ranges"),
-		ForwardContentRange: fileRes.Headers.Get("Content-Range"),
+		ForwardAcceptRange:  forwardedAcceptRanges(fileRes.StatusCode, fileRes.Headers.Get("Accept-Ranges")),
+		ForwardContentRange: forwardedContentRange(fileRes.StatusCode, fileRes.Headers.Get("Content-Range")),
 	}, nil
 }
 
@@ -325,4 +339,18 @@ func cloneHeaders(src map[string]string) map[string]string {
 		dst[k] = v
 	}
 	return dst
+}
+
+func forwardedAcceptRanges(status int, value string) string {
+	if status == http.StatusPartialContent || status == http.StatusRequestedRangeNotSatisfiable {
+		return value
+	}
+	return ""
+}
+
+func forwardedContentRange(status int, value string) string {
+	if status == http.StatusPartialContent || status == http.StatusRequestedRangeNotSatisfiable {
+		return value
+	}
+	return ""
 }

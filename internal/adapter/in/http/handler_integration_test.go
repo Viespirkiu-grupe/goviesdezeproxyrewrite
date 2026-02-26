@@ -30,12 +30,20 @@ type testFileGateway struct {
 	res         out.FileResponse
 	err         error
 	lastHeaders map[string]string
+	allHeaders  []map[string]string
+	responses   []out.FileResponse
+	callCount   int
 }
 
 func (g *testFileGateway) FetchFile(_ context.Context, _ string, headers map[string]string) (out.FileResponse, error) {
+	g.callCount++
 	g.lastHeaders = make(map[string]string, len(headers))
 	for k, v := range headers {
 		g.lastHeaders[k] = v
+	}
+	g.allHeaders = append(g.allHeaders, g.lastHeaders)
+	if len(g.responses) >= g.callCount {
+		return g.responses[g.callCount-1], g.err
 	}
 	return g.res, g.err
 }
@@ -288,12 +296,9 @@ func TestHTTPAdapter_InvalidConvertToReturnsBadRequest(t *testing.T) {
 func TestHTTPAdapter_ForwardsRangeForRawPassthrough(t *testing.T) {
 	t.Parallel()
 
-	fileGateway := &testFileGateway{res: out.FileResponse{
-		StatusCode: http.StatusPartialContent,
-		Headers: http.Header{
-			"Content-Range": []string{"bytes 0-10/16"},
-		},
-		Body: io.NopCloser(strings.NewReader("0123456789a")),
+	fileGateway := &testFileGateway{responses: []out.FileResponse{
+		{StatusCode: http.StatusOK, Headers: make(http.Header), Body: io.NopCloser(strings.NewReader("partial-from-upstream"))},
+		{StatusCode: http.StatusOK, Headers: make(http.Header), Body: io.NopCloser(strings.NewReader("0123456789abcdef"))},
 	}}
 
 	r := buildHTTPAdapter(
@@ -317,8 +322,14 @@ func TestHTTPAdapter_ForwardsRangeForRawPassthrough(t *testing.T) {
 	if rec.Body.String() != "0123456789a" {
 		t.Fatalf("unexpected partial body: %q", rec.Body.String())
 	}
-	if got := fileGateway.lastHeaders["Range"]; got != "bytes=0-10" {
-		t.Fatalf("expected upstream Range forwarding, got %q", got)
+	if fileGateway.callCount != 2 {
+		t.Fatalf("expected two upstream calls, got %d", fileGateway.callCount)
+	}
+	if got := fileGateway.allHeaders[0]["Range"]; got != "bytes=0-10" {
+		t.Fatalf("expected first call with range, got %q", got)
+	}
+	if got := fileGateway.allHeaders[1]["Range"]; got != "" {
+		t.Fatalf("expected second call without range, got %q", got)
 	}
 }
 
@@ -346,5 +357,39 @@ func TestHTTPAdapter_DoesNotForwardRangeForConversion(t *testing.T) {
 	}
 	if got := fileGateway.lastHeaders["Range"]; got != "" {
 		t.Fatalf("expected no upstream range forwarding for conversion, got %q", got)
+	}
+}
+
+func TestHTTPAdapter_RangeFallbackWhenUpstreamReturns200(t *testing.T) {
+	t.Parallel()
+
+	fileGateway := &testFileGateway{res: out.FileResponse{StatusCode: http.StatusOK, Headers: make(http.Header), Body: io.NopCloser(strings.NewReader("0123456789abcdef"))}}
+
+	r := buildHTTPAdapter(
+		&testProxyInfoGateway{res: out.ProxyInfoResponse{StatusCode: http.StatusOK, Body: []byte(`{"fileUrl":"http://upstream/file","fileName":"file.pdf"}`)}},
+		fileGateway,
+		&testArchiveGateway{},
+		&testConversionGateway{},
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/123", nil)
+	req.Header.Set("Range", "bytes=0-10")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusPartialContent {
+		t.Fatalf("expected status 206, got %d", rec.Code)
+	}
+	if rec.Body.String() != "0123456789a" {
+		t.Fatalf("unexpected partial body: %q", rec.Body.String())
+	}
+	if fileGateway.callCount != 2 {
+		t.Fatalf("expected two upstream calls, got %d", fileGateway.callCount)
+	}
+	if got := fileGateway.allHeaders[0]["Range"]; got != "bytes=0-10" {
+		t.Fatalf("expected first call with range, got %q", got)
+	}
+	if got := fileGateway.allHeaders[1]["Range"]; got != "" {
+		t.Fatalf("expected second call without range, got %q", got)
 	}
 }

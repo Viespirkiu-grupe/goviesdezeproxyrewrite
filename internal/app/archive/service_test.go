@@ -24,12 +24,20 @@ type fileGatewayMock struct {
 	res         out.FileResponse
 	err         error
 	lastHeaders map[string]string
+	allHeaders  []map[string]string
+	responses   []out.FileResponse
+	callCount   int
 }
 
 func (m *fileGatewayMock) FetchFile(_ context.Context, _ string, headers map[string]string) (out.FileResponse, error) {
+	m.callCount++
 	m.lastHeaders = make(map[string]string, len(headers))
 	for k, v := range headers {
 		m.lastHeaders[k] = v
+	}
+	m.allHeaders = append(m.allHeaders, m.lastHeaders)
+	if len(m.responses) >= m.callCount {
+		return m.responses[m.callCount-1], m.err
 	}
 	return m.res, m.err
 }
@@ -413,5 +421,83 @@ func TestExecute_DoesNotForwardRangeForConversion(t *testing.T) {
 
 	if got := fileGateway.lastHeaders["Range"]; got != "" {
 		t.Fatalf("expected no Range forwarding for conversion, got %q", got)
+	}
+}
+
+func TestExecute_RangeUpstream200RefetchesFullBody(t *testing.T) {
+	t.Parallel()
+
+	proxyBody := []byte(`{"fileUrl":"http://example/file","fileName":"report.pdf"}`)
+	fileGateway := &fileGatewayMock{responses: []out.FileResponse{
+		{StatusCode: 200, Headers: make(http.Header), Body: io.NopCloser(bytes.NewReader([]byte("partial-upstream")))},
+		{StatusCode: 200, Headers: make(http.Header), Body: io.NopCloser(bytes.NewReader([]byte("full-upstream-body")))},
+	}}
+
+	svc := NewService(
+		&proxyInfoGatewayMock{res: out.ProxyInfoResponse{StatusCode: 200, Body: proxyBody}},
+		fileGateway,
+		&archiveGatewayMock{},
+		&conversionGatewayMock{},
+	)
+
+	res, err := svc.Execute(context.Background(), Request{RequestedID: "123", Range: "bytes=5-9"})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	defer res.Body.Close()
+
+	if fileGateway.callCount != 2 {
+		t.Fatalf("expected two upstream calls, got %d", fileGateway.callCount)
+	}
+	if got := fileGateway.allHeaders[0]["Range"]; got != "bytes=5-9" {
+		t.Fatalf("expected first call with range, got %q", got)
+	}
+	if got := fileGateway.allHeaders[1]["Range"]; got != "" {
+		t.Fatalf("expected second call without range, got %q", got)
+	}
+	b, _ := io.ReadAll(res.Body)
+	if string(b) != "full-upstream-body" {
+		t.Fatalf("unexpected body after refetch: %q", string(b))
+	}
+}
+
+func TestExecute_RawRangeFallbackKeeps200ForHandlerSlicing(t *testing.T) {
+	t.Parallel()
+
+	proxyBody := []byte(`{"fileUrl":"http://example/file","fileName":"report.pdf"}`)
+	fileGateway := &fileGatewayMock{res: out.FileResponse{
+		StatusCode: http.StatusOK,
+		Headers:    make(http.Header),
+		Body:       io.NopCloser(bytes.NewReader([]byte("full-body"))),
+	}}
+
+	svc := NewService(
+		&proxyInfoGatewayMock{res: out.ProxyInfoResponse{StatusCode: 200, Body: proxyBody}},
+		fileGateway,
+		&archiveGatewayMock{},
+		&conversionGatewayMock{},
+	)
+
+	res, err := svc.Execute(context.Background(), Request{RequestedID: "123", Range: "bytes=999-1000"})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", res.StatusCode)
+	}
+	if fileGateway.callCount != 2 {
+		t.Fatalf("expected two upstream calls, got %d", fileGateway.callCount)
+	}
+	if got := fileGateway.allHeaders[0]["Range"]; got != "bytes=999-1000" {
+		t.Fatalf("expected first call with range, got %q", got)
+	}
+	if got := fileGateway.allHeaders[1]["Range"]; got != "" {
+		t.Fatalf("expected second call without range, got %q", got)
+	}
+	b, _ := io.ReadAll(res.Body)
+	if string(b) != "full-body" {
+		t.Fatalf("unexpected body: %q", string(b))
 	}
 }

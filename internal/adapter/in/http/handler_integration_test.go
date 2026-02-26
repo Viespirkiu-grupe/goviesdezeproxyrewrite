@@ -285,10 +285,16 @@ func TestHTTPAdapter_InvalidConvertToReturnsBadRequest(t *testing.T) {
 	}
 }
 
-func TestHTTPAdapter_AppliesRangeOnResponse(t *testing.T) {
+func TestHTTPAdapter_ForwardsRangeForRawPassthrough(t *testing.T) {
 	t.Parallel()
 
-	fileGateway := &testFileGateway{res: out.FileResponse{StatusCode: http.StatusOK, Headers: make(http.Header), Body: io.NopCloser(strings.NewReader("0123456789abcdef"))}}
+	fileGateway := &testFileGateway{res: out.FileResponse{
+		StatusCode: http.StatusPartialContent,
+		Headers: http.Header{
+			"Content-Range": []string{"bytes 0-10/16"},
+		},
+		Body: io.NopCloser(strings.NewReader("0123456789a")),
+	}}
 
 	r := buildHTTPAdapter(
 		&testProxyInfoGateway{res: out.ProxyInfoResponse{StatusCode: http.StatusOK, Body: []byte(`{"fileUrl":"http://upstream/file","fileName":"file.pdf"}`)}},
@@ -311,7 +317,34 @@ func TestHTTPAdapter_AppliesRangeOnResponse(t *testing.T) {
 	if rec.Body.String() != "0123456789a" {
 		t.Fatalf("unexpected partial body: %q", rec.Body.String())
 	}
+	if got := fileGateway.lastHeaders["Range"]; got != "bytes=0-10" {
+		t.Fatalf("expected upstream Range forwarding, got %q", got)
+	}
+}
+
+func TestHTTPAdapter_DoesNotForwardRangeForConversion(t *testing.T) {
+	t.Parallel()
+
+	fileGateway := &testFileGateway{res: out.FileResponse{StatusCode: http.StatusOK, Headers: make(http.Header), Body: io.NopCloser(strings.NewReader("raw"))}}
+
+	r := buildHTTPAdapter(
+		&testProxyInfoGateway{res: out.ProxyInfoResponse{StatusCode: http.StatusOK, Body: []byte(`{"fileUrl":"http://upstream/file","fileName":"file.png"}`)}},
+		fileGateway,
+		&testArchiveGateway{},
+		&testConversionGateway{convertFn: func(_ context.Context, _ io.Reader, _ string, _ string) (io.ReadCloser, string, string, error) {
+			return io.NopCloser(strings.NewReader("0123456789abcdef")), "file.webp", "image/webp", nil
+		}},
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/123?convertTo=webp", nil)
+	req.Header.Set("Range", "bytes=0-10")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusPartialContent {
+		t.Fatalf("expected status 206, got %d", rec.Code)
+	}
 	if got := fileGateway.lastHeaders["Range"]; got != "" {
-		t.Fatalf("expected no upstream Range forwarding, got %q", got)
+		t.Fatalf("expected no upstream range forwarding for conversion, got %q", got)
 	}
 }

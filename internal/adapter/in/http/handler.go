@@ -43,6 +43,8 @@ func (h *Handler) HandleArchive(w http.ResponseWriter, r *http.Request) {
 		PathFile:    pathFile,
 		ConvertTo:   r.URL.Query().Get("convertTo"),
 		Index:       r.URL.Query().Get("index"),
+		Range:       r.Header.Get("Range"),
+		IfRange:     r.Header.Get("If-Range"),
 	})
 	if err != nil {
 		if errors.Is(err, r.Context().Err()) {
@@ -67,7 +69,18 @@ func (h *Handler) HandleArchive(w http.ResponseWriter, r *http.Request) {
 	if result.CacheControl != "" {
 		w.Header().Set("Cache-Control", result.CacheControl)
 	}
+	if result.ForwardAcceptRange != "" {
+		w.Header().Set("Accept-Ranges", result.ForwardAcceptRange)
+	}
+	if result.ForwardContentRange != "" {
+		w.Header().Set("Content-Range", result.ForwardContentRange)
+	}
 	if result.StatusCode < 200 || result.StatusCode >= 300 {
+		w.WriteHeader(result.StatusCode)
+		_, _ = io.Copy(w, result.Body)
+		return
+	}
+	if result.StatusCode == http.StatusPartialContent {
 		w.WriteHeader(result.StatusCode)
 		_, _ = io.Copy(w, result.Body)
 		return

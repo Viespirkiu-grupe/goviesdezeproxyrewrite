@@ -22,14 +22,18 @@ type Request struct {
 	PathFile    string
 	ConvertTo   string
 	Index       string
+	Range       string
+	IfRange     string
 }
 
 type Result struct {
-	StatusCode   int
-	Body         io.ReadCloser
-	ContentType  string
-	FileName     string
-	CacheControl string
+	StatusCode          int
+	Body                io.ReadCloser
+	ContentType         string
+	FileName            string
+	CacheControl        string
+	ForwardAcceptRange  string
+	ForwardContentRange string
 }
 
 type StatusError struct {
@@ -89,8 +93,35 @@ func (s *Service) Execute(ctx context.Context, req Request) (*Result, error) {
 		return nil, &StatusError{Status: 502, Message: "proxy info missing fileUrl"}
 	}
 
+	convertTo := strings.ToLower(strings.TrimSpace(req.ConvertTo))
+	target := info.Extract
+	if target == "" {
+		target = req.PathFile
+	}
+	target = strings.TrimSpace(target)
+	target = strings.TrimPrefix(target, "/")
+	target = path.Clean(target)
+	if target == "0" {
+		target = ""
+	}
+	if target == "." {
+		target = ""
+	}
+
+	requiresExtraction := target != ""
+	requiresConversion := convertTo != ""
+	forwardRangeToUpstream := req.Range != "" && !requiresExtraction && !requiresConversion
+
 	log.Printf("archive: fetch file requestedID=%s", req.RequestedID)
-	fileRes, err := s.file.FetchFile(ctx, info.FileURL, cloneHeaders(info.Headers))
+	upstreamHeaders := cloneHeaders(info.Headers)
+	if forwardRangeToUpstream {
+		upstreamHeaders["Range"] = req.Range
+		if req.IfRange != "" {
+			upstreamHeaders["If-Range"] = req.IfRange
+		}
+	}
+
+	fileRes, err := s.file.FetchFile(ctx, info.FileURL, upstreamHeaders)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return nil, err
@@ -108,19 +139,6 @@ func (s *Service) Execute(ctx context.Context, req Request) (*Result, error) {
 
 	body := fileRes.Body
 	name := info.FileName
-	target := info.Extract
-	if target == "" {
-		target = req.PathFile
-	}
-	target = strings.TrimSpace(target)
-	target = strings.TrimPrefix(target, "/")
-	target = path.Clean(target)
-	if target == "0" {
-		target = ""
-	}
-	if target == "." {
-		target = ""
-	}
 
 	if target != "" {
 		log.Printf("archive: extract target=%q requestedID=%s", target, req.RequestedID)
@@ -178,7 +196,6 @@ func (s *Service) Execute(ctx context.Context, req Request) (*Result, error) {
 	}
 
 	contentType := contentTypeFromExt(name)
-	convertTo := strings.ToLower(strings.TrimSpace(req.ConvertTo))
 	if convertTo != "" {
 		if !isSupportedConvertTo(convertTo) {
 			_ = body.Close()
@@ -206,11 +223,13 @@ func (s *Service) Execute(ctx context.Context, req Request) (*Result, error) {
 	}
 
 	return &Result{
-		StatusCode:   fileRes.StatusCode,
-		Body:         body,
-		ContentType:  contentType,
-		FileName:     name,
-		CacheControl: "public, max-age=2592000, immutable",
+		StatusCode:          fileRes.StatusCode,
+		Body:                body,
+		ContentType:         contentType,
+		FileName:            name,
+		CacheControl:        "public, max-age=2592000, immutable",
+		ForwardAcceptRange:  fileRes.Headers.Get("Accept-Ranges"),
+		ForwardContentRange: fileRes.Headers.Get("Content-Range"),
 	}, nil
 }
 

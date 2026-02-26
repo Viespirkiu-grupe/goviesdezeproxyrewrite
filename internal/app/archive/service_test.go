@@ -21,11 +21,16 @@ func (m *proxyInfoGatewayMock) FetchProxyInfo(_ context.Context, _ string) (out.
 }
 
 type fileGatewayMock struct {
-	res out.FileResponse
-	err error
+	res         out.FileResponse
+	err         error
+	lastHeaders map[string]string
 }
 
-func (m *fileGatewayMock) FetchFile(_ context.Context, _ string, _ map[string]string) (out.FileResponse, error) {
+func (m *fileGatewayMock) FetchFile(_ context.Context, _ string, headers map[string]string) (out.FileResponse, error) {
+	m.lastHeaders = make(map[string]string, len(headers))
+	for k, v := range headers {
+		m.lastHeaders[k] = v
+	}
 	return m.res, m.err
 }
 
@@ -209,5 +214,148 @@ func TestBestMatch_ExactBaseNameWins(t *testing.T) {
 	}
 	if got != "deep/nested/22359029.pdf" {
 		t.Fatalf("unexpected match: %s", got)
+	}
+}
+
+func TestExecute_PathFileZeroSkipsExtraction(t *testing.T) {
+	t.Parallel()
+
+	proxyBody := []byte(`{"fileUrl":"http://example/file","extension":"zip","fileName":"orig.zip"}`)
+
+	listCalled := false
+	svc := NewService(
+		&proxyInfoGatewayMock{res: out.ProxyInfoResponse{StatusCode: 200, Body: proxyBody}},
+		&fileGatewayMock{res: out.FileResponse{
+			StatusCode: 200,
+			Headers:    make(http.Header),
+			Body:       io.NopCloser(bytes.NewReader([]byte("raw-zip-bytes"))),
+		}},
+		&archiveGatewayMock{
+			listFilesFn: func(_ []byte) ([]string, error) {
+				listCalled = true
+				return nil, nil
+			},
+		},
+		&conversionGatewayMock{},
+	)
+
+	res, err := svc.Execute(context.Background(), Request{RequestedID: "123", PathFile: "0"})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	defer res.Body.Close()
+
+	if listCalled {
+		t.Fatal("expected archive listing to be skipped for pathFile=0")
+	}
+
+	b, _ := io.ReadAll(res.Body)
+	if string(b) != "raw-zip-bytes" {
+		t.Fatalf("unexpected body: %q", string(b))
+	}
+}
+
+func TestExecute_UnsupportedConvertToReturnsBadRequest(t *testing.T) {
+	t.Parallel()
+
+	proxyBody := []byte(`{"fileUrl":"http://example/file","fileName":"report.pdf"}`)
+
+	svc := NewService(
+		&proxyInfoGatewayMock{res: out.ProxyInfoResponse{StatusCode: 200, Body: proxyBody}},
+		&fileGatewayMock{res: out.FileResponse{
+			StatusCode: 200,
+			Headers:    make(http.Header),
+			Body:       io.NopCloser(bytes.NewReader([]byte("pdf-bytes"))),
+		}},
+		&archiveGatewayMock{},
+		&conversionGatewayMock{},
+	)
+
+	_, err := svc.Execute(context.Background(), Request{RequestedID: "123", ConvertTo: "randomtext"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	statusErr := &StatusError{}
+	if !errors.As(err, &statusErr) {
+		t.Fatalf("expected StatusError, got %T", err)
+	}
+	if statusErr.Status != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", statusErr.Status)
+	}
+}
+
+func TestExecute_WebpConvertToIsAllowed(t *testing.T) {
+	t.Parallel()
+
+	proxyBody := []byte(`{"fileUrl":"http://example/file","fileName":"image.png"}`)
+	conversionCalled := false
+
+	svc := NewService(
+		&proxyInfoGatewayMock{res: out.ProxyInfoResponse{StatusCode: 200, Body: proxyBody}},
+		&fileGatewayMock{res: out.FileResponse{
+			StatusCode: 200,
+			Headers:    make(http.Header),
+			Body:       io.NopCloser(bytes.NewReader([]byte("img-bytes"))),
+		}},
+		&archiveGatewayMock{},
+		&conversionGatewayMock{convertFn: func(_ context.Context, _ io.Reader, _ string, targetFormat string) (io.ReadCloser, string, string, error) {
+			conversionCalled = true
+			if targetFormat != "webp" {
+				t.Fatalf("expected webp target, got %s", targetFormat)
+			}
+			return io.NopCloser(bytes.NewReader([]byte("webp-data"))), "image.webp", "image/webp", nil
+		}},
+	)
+
+	res, err := svc.Execute(context.Background(), Request{RequestedID: "123", ConvertTo: "webp"})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	defer res.Body.Close()
+
+	if !conversionCalled {
+		t.Fatal("expected conversion to be called")
+	}
+	if res.ContentType != "image/webp" {
+		t.Fatalf("expected image/webp content type, got %s", res.ContentType)
+	}
+}
+
+func TestExecute_ForwardsRangeHeadersToUpstream(t *testing.T) {
+	t.Parallel()
+
+	proxyBody := []byte(`{"fileUrl":"http://example/file","fileName":"report.pdf","headers":{"X-Test":"1"}}`)
+	fileGateway := &fileGatewayMock{res: out.FileResponse{
+		StatusCode: 206,
+		Headers:    make(http.Header),
+		Body:       io.NopCloser(bytes.NewReader([]byte("partial"))),
+	}}
+
+	svc := NewService(
+		&proxyInfoGatewayMock{res: out.ProxyInfoResponse{StatusCode: 200, Body: proxyBody}},
+		fileGateway,
+		&archiveGatewayMock{},
+		&conversionGatewayMock{},
+	)
+
+	res, err := svc.Execute(context.Background(), Request{
+		RequestedID: "123",
+		Range:       "bytes=0-10",
+		IfRange:     "W/\"etag\"",
+	})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	defer res.Body.Close()
+
+	if got := fileGateway.lastHeaders["Range"]; got != "bytes=0-10" {
+		t.Fatalf("expected Range forwarded, got %q", got)
+	}
+	if got := fileGateway.lastHeaders["If-Range"]; got != "W/\"etag\"" {
+		t.Fatalf("expected If-Range forwarded, got %q", got)
+	}
+	if got := fileGateway.lastHeaders["X-Test"]; got != "1" {
+		t.Fatalf("expected original header preserved, got %q", got)
 	}
 }

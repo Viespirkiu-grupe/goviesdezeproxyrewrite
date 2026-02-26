@@ -22,6 +22,8 @@ type Request struct {
 	PathFile    string
 	ConvertTo   string
 	Index       string
+	Range       string
+	IfRange     string
 }
 
 type Result struct {
@@ -65,6 +67,7 @@ func NewService(
 }
 
 func (s *Service) Execute(ctx context.Context, req Request) (*Result, error) {
+	log.Printf("archive: fetch proxy info requestedID=%s", req.RequestedID)
 	infoRes, err := s.proxyInfo.FetchProxyInfo(ctx, req.RequestedID)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
@@ -72,6 +75,7 @@ func (s *Service) Execute(ctx context.Context, req Request) (*Result, error) {
 		}
 		return nil, &StatusError{Status: 502, Message: "failed to fetch proxy info"}
 	}
+	log.Printf("archive: proxy info status=%d requestedID=%s", infoRes.StatusCode, req.RequestedID)
 
 	if infoRes.StatusCode < 200 || infoRes.StatusCode >= 300 {
 		return &Result{
@@ -89,13 +93,23 @@ func (s *Service) Execute(ctx context.Context, req Request) (*Result, error) {
 		return nil, &StatusError{Status: 502, Message: "proxy info missing fileUrl"}
 	}
 
-	fileRes, err := s.file.FetchFile(ctx, info.FileURL, info.Headers)
+	log.Printf("archive: fetch file requestedID=%s", req.RequestedID)
+	upstreamHeaders := cloneHeaders(info.Headers)
+	if req.Range != "" {
+		upstreamHeaders["Range"] = req.Range
+	}
+	if req.IfRange != "" {
+		upstreamHeaders["If-Range"] = req.IfRange
+	}
+
+	fileRes, err := s.file.FetchFile(ctx, info.FileURL, upstreamHeaders)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return nil, err
 		}
 		return nil, &StatusError{Status: 502, Message: "failed to fetch file"}
 	}
+	log.Printf("archive: file status=%d requestedID=%s", fileRes.StatusCode, req.RequestedID)
 
 	if fileRes.StatusCode < 200 || fileRes.StatusCode >= 300 {
 		return &Result{
@@ -113,11 +127,15 @@ func (s *Service) Execute(ctx context.Context, req Request) (*Result, error) {
 	target = strings.TrimSpace(target)
 	target = strings.TrimPrefix(target, "/")
 	target = path.Clean(target)
+	if target == "0" {
+		target = ""
+	}
 	if target == "." {
 		target = ""
 	}
 
 	if target != "" {
+		log.Printf("archive: extract target=%q requestedID=%s", target, req.RequestedID)
 		archiveBytes, err := io.ReadAll(fileRes.Body)
 		_ = fileRes.Body.Close()
 		if err != nil {
@@ -172,8 +190,13 @@ func (s *Service) Execute(ctx context.Context, req Request) (*Result, error) {
 	}
 
 	contentType := contentTypeFromExt(name)
-	convertTo := strings.ToLower(req.ConvertTo)
+	convertTo := strings.ToLower(strings.TrimSpace(req.ConvertTo))
 	if convertTo != "" {
+		if !isSupportedConvertTo(convertTo) {
+			_ = body.Close()
+			return nil, &StatusError{Status: 400, Message: "unsupported convertTo value"}
+		}
+
 		if isImageTarget(convertTo) && !isImageExt(strings.TrimPrefix(strings.ToLower(filepath.Ext(name)), ".")) {
 			_ = body.Close()
 			return nil, &StatusError{Status: 400, Message: "source file is not an image"}
@@ -270,7 +293,7 @@ func contentTypeFromExt(filename string) string {
 
 func isImageTarget(v string) bool {
 	switch v {
-	case "jpg", "jpeg", "png", "tif", "tiff", "bmp", "prn", "gif", "jfif", "heic":
+	case "jpg", "jpeg", "png", "tif", "tiff", "bmp", "prn", "gif", "jfif", "heic", "webp":
 		return true
 	default:
 		return false
@@ -279,4 +302,22 @@ func isImageTarget(v string) bool {
 
 func isImageExt(ext string) bool {
 	return isImageTarget(ext)
+}
+
+func isSupportedConvertTo(v string) bool {
+	if v == "pdf" {
+		return true
+	}
+	return isImageTarget(v)
+}
+
+func cloneHeaders(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return map[string]string{}
+	}
+	dst := make(map[string]string, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
 }

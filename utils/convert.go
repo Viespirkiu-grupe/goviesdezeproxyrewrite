@@ -212,7 +212,7 @@ func ConvertImageReaderToPDF(
 }
 
 // ConvertImageReader converts an image from src to the target format
-// supported formats: jpg, jpeg, png, tif, tiff, bmp, prn, gif, jfif, heic
+// supported formats: jpg, jpeg, png, tif, tiff, bmp, prn, gif, jfif, heic, webp
 func ConvertImageReader(src io.Reader, targetFormat string) (io.ReadCloser, error) {
 	// Save input to temp file
 	tmpIn, err := os.CreateTemp("", "img-*")

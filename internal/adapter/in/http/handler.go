@@ -41,6 +41,8 @@ func (h *Handler) HandleArchive(w http.ResponseWriter, r *http.Request) {
 		PathFile:    pathFile,
 		ConvertTo:   r.URL.Query().Get("convertTo"),
 		Index:       r.URL.Query().Get("index"),
+		Range:       r.Header.Get("Range"),
+		IfRange:     r.Header.Get("If-Range"),
 	})
 	if err != nil {
 		if errors.Is(err, r.Context().Err()) {

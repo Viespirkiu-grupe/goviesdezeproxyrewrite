@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -40,6 +42,18 @@ func cleanTmp() {
 	}
 }
 
+func envDurationSeconds(key string, fallback time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	seconds, err := strconv.Atoi(v)
+	if err != nil || seconds <= 0 {
+		return fallback
+	}
+	return time.Duration(seconds) * time.Second
+}
+
 func main() {
 	go cleanTmp() // runs in background
 
@@ -51,6 +65,8 @@ func main() {
 	}
 	mainServer := getenvMust("MAIN_SERVER") // e.g. http://localhost:3000
 	apiKey := getenvMust("PROXY_API_KEY")   // same as DB
+	dialTimeout := envDurationSeconds("PROXY_UPSTREAM_DIAL_TIMEOUT", 10*time.Second)
+	headerTimeout := envDurationSeconds("PROXY_UPSTREAM_RESPONSE_HEADER_TIMEOUT", 30*time.Second)
 	baseURL, err := url.Parse(mainServer)
 	if err != nil {
 		log.Fatalf("invalid MAIN_SERVER: %v", err)
@@ -60,9 +76,11 @@ func main() {
 	transport := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		ForceAttemptHTTP2:     true,
+		DialContext:           (&net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}).DialContext,
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: headerTimeout,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 	client := &http.Client{

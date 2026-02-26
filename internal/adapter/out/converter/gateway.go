@@ -53,7 +53,7 @@ func (g *Gateway) Convert(ctx context.Context, src io.Reader, sourceName, target
 
 func isImage(ext string) bool {
 	switch ext {
-	case "jpg", "jpeg", "png", "tif", "tiff", "bmp", "prn", "gif", "jfif", "heic":
+	case "jpg", "jpeg", "png", "tif", "tiff", "bmp", "prn", "gif", "jfif", "heic", "webp":
 		return true
 	default:
 		return false

@@ -27,11 +27,16 @@ func (g *testProxyInfoGateway) FetchProxyInfo(_ context.Context, requestedID str
 }
 
 type testFileGateway struct {
-	res out.FileResponse
-	err error
+	res         out.FileResponse
+	err         error
+	lastHeaders map[string]string
 }
 
-func (g *testFileGateway) FetchFile(_ context.Context, _ string, _ map[string]string) (out.FileResponse, error) {
+func (g *testFileGateway) FetchFile(_ context.Context, _ string, headers map[string]string) (out.FileResponse, error) {
+	g.lastHeaders = make(map[string]string, len(headers))
+	for k, v := range headers {
+		g.lastHeaders[k] = v
+	}
 	return g.res, g.err
 }
 
@@ -234,5 +239,82 @@ func TestHTTPAdapter_MD5RouteUsesIDParam(t *testing.T) {
 	}
 	if rec.Body.String() != "ok" {
 		t.Fatalf("unexpected body: %q", rec.Body.String())
+	}
+}
+
+func TestHTTPAdapter_PathFileZeroStreamsRawFile(t *testing.T) {
+	t.Parallel()
+
+	archiveCalled := false
+
+	r := buildHTTPAdapter(
+		&testProxyInfoGateway{res: out.ProxyInfoResponse{StatusCode: http.StatusOK, Body: []byte(`{"fileUrl":"http://upstream/file","extension":"zip","fileName":"raw.zip"}`)}},
+		&testFileGateway{res: out.FileResponse{StatusCode: http.StatusOK, Headers: make(http.Header), Body: io.NopCloser(strings.NewReader("raw-content"))}},
+		&testArchiveGateway{listFilesFn: func(_ []byte) ([]string, error) {
+			archiveCalled = true
+			return []string{"x"}, nil
+		}},
+		&testConversionGateway{},
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/123/0", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+	if archiveCalled {
+		t.Fatal("archive path should not be used for /0")
+	}
+	if rec.Body.String() != "raw-content" {
+		t.Fatalf("unexpected body: %q", rec.Body.String())
+	}
+}
+
+func TestHTTPAdapter_InvalidConvertToReturnsBadRequest(t *testing.T) {
+	t.Parallel()
+
+	r := buildHTTPAdapter(
+		&testProxyInfoGateway{res: out.ProxyInfoResponse{StatusCode: http.StatusOK, Body: []byte(`{"fileUrl":"http://upstream/file","fileName":"file.pdf"}`)}},
+		&testFileGateway{res: out.FileResponse{StatusCode: http.StatusOK, Headers: make(http.Header), Body: io.NopCloser(strings.NewReader("content"))}},
+		&testArchiveGateway{},
+		&testConversionGateway{},
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/123?convertTo=undefined", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "unsupported convertTo value") {
+		t.Fatalf("unexpected body: %q", rec.Body.String())
+	}
+}
+
+func TestHTTPAdapter_ForwardsRangeHeader(t *testing.T) {
+	t.Parallel()
+
+	fileGateway := &testFileGateway{res: out.FileResponse{StatusCode: http.StatusPartialContent, Headers: make(http.Header), Body: io.NopCloser(strings.NewReader("partial"))}}
+
+	r := buildHTTPAdapter(
+		&testProxyInfoGateway{res: out.ProxyInfoResponse{StatusCode: http.StatusOK, Body: []byte(`{"fileUrl":"http://upstream/file","fileName":"file.pdf"}`)}},
+		fileGateway,
+		&testArchiveGateway{},
+		&testConversionGateway{},
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/123", nil)
+	req.Header.Set("Range", "bytes=0-10")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusPartialContent {
+		t.Fatalf("expected status 206, got %d", rec.Code)
+	}
+	if got := fileGateway.lastHeaders["Range"]; got != "bytes=0-10" {
+		t.Fatalf("expected Range forwarded, got %q", got)
 	}
 }

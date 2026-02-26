@@ -22,18 +22,14 @@ type Request struct {
 	PathFile    string
 	ConvertTo   string
 	Index       string
-	Range       string
-	IfRange     string
 }
 
 type Result struct {
-	StatusCode          int
-	Body                io.ReadCloser
-	ContentType         string
-	FileName            string
-	CacheControl        string
-	ForwardAcceptRange  string
-	ForwardContentRange string
+	StatusCode   int
+	Body         io.ReadCloser
+	ContentType  string
+	FileName     string
+	CacheControl string
 }
 
 type StatusError struct {
@@ -94,15 +90,7 @@ func (s *Service) Execute(ctx context.Context, req Request) (*Result, error) {
 	}
 
 	log.Printf("archive: fetch file requestedID=%s", req.RequestedID)
-	upstreamHeaders := cloneHeaders(info.Headers)
-	if req.Range != "" {
-		upstreamHeaders["Range"] = req.Range
-	}
-	if req.IfRange != "" {
-		upstreamHeaders["If-Range"] = req.IfRange
-	}
-
-	fileRes, err := s.file.FetchFile(ctx, info.FileURL, upstreamHeaders)
+	fileRes, err := s.file.FetchFile(ctx, info.FileURL, cloneHeaders(info.Headers))
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return nil, err
@@ -218,13 +206,11 @@ func (s *Service) Execute(ctx context.Context, req Request) (*Result, error) {
 	}
 
 	return &Result{
-		StatusCode:          fileRes.StatusCode,
-		Body:                body,
-		ContentType:         contentType,
-		FileName:            name,
-		CacheControl:        "public, max-age=2592000, immutable",
-		ForwardAcceptRange:  fileRes.Headers.Get("Accept-Ranges"),
-		ForwardContentRange: fileRes.Headers.Get("Content-Range"),
+		StatusCode:   fileRes.StatusCode,
+		Body:         body,
+		ContentType:  contentType,
+		FileName:     name,
+		CacheControl: "public, max-age=2592000, immutable",
 	}, nil
 }
 

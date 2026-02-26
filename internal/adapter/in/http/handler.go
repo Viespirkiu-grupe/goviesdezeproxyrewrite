@@ -1,6 +1,7 @@
 package http
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"path"
 	"regexp"
 	"strconv"
+	"time"
 
 	archiveapp "github.com/Viespirkiu-grupe/goviesdezeproxyrewrite/internal/app/archive"
 	"github.com/go-chi/chi/v5"
@@ -41,8 +43,6 @@ func (h *Handler) HandleArchive(w http.ResponseWriter, r *http.Request) {
 		PathFile:    pathFile,
 		ConvertTo:   r.URL.Query().Get("convertTo"),
 		Index:       r.URL.Query().Get("index"),
-		Range:       r.Header.Get("Range"),
-		IfRange:     r.Header.Get("If-Range"),
 	})
 	if err != nil {
 		if errors.Is(err, r.Context().Err()) {
@@ -67,15 +67,19 @@ func (h *Handler) HandleArchive(w http.ResponseWriter, r *http.Request) {
 	if result.CacheControl != "" {
 		w.Header().Set("Cache-Control", result.CacheControl)
 	}
-	if result.ForwardAcceptRange != "" {
-		w.Header().Set("Accept-Ranges", result.ForwardAcceptRange)
-	}
-	if result.ForwardContentRange != "" {
-		w.Header().Set("Content-Range", result.ForwardContentRange)
+	if result.StatusCode < 200 || result.StatusCode >= 300 {
+		w.WriteHeader(result.StatusCode)
+		_, _ = io.Copy(w, result.Body)
+		return
 	}
 
-	w.WriteHeader(result.StatusCode)
-	_, _ = io.Copy(w, result.Body)
+	body, readErr := io.ReadAll(result.Body)
+	if readErr != nil {
+		http.Error(w, "failed to read response body", http.StatusBadGateway)
+		return
+	}
+
+	http.ServeContent(w, r, path.Base(result.FileName), time.Time{}, bytes.NewReader(body))
 }
 
 func resolveRequestedID(id, dokID, fileID string) (string, error) {

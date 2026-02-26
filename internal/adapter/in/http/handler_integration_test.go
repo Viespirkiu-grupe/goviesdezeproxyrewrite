@@ -106,11 +106,8 @@ func TestHTTPAdapter_FullFlowWithRouteAndQuery(t *testing.T) {
 	file := &testFileGateway{
 		res: out.FileResponse{
 			StatusCode: http.StatusOK,
-			Headers: http.Header{
-				"Accept-Ranges": []string{"bytes"},
-				"Content-Range": []string{"bytes 0-3/4"},
-			},
-			Body: io.NopCloser(strings.NewReader("ARCHIVE")),
+			Headers:    make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("ARCHIVE")),
 		},
 	}
 	archive := &testArchiveGateway{
@@ -156,12 +153,6 @@ func TestHTTPAdapter_FullFlowWithRouteAndQuery(t *testing.T) {
 	}
 	if got := rec.Header().Get("Cache-Control"); got != "public, max-age=2592000, immutable" {
 		t.Fatalf("unexpected cache-control: %s", got)
-	}
-	if got := rec.Header().Get("Accept-Ranges"); got != "bytes" {
-		t.Fatalf("unexpected accept-ranges: %s", got)
-	}
-	if got := rec.Header().Get("Content-Range"); got != "bytes 0-3/4" {
-		t.Fatalf("unexpected content-range: %s", got)
 	}
 	if body := rec.Body.String(); body != "PDF-BODY" {
 		t.Fatalf("unexpected body: %q", body)
@@ -294,10 +285,10 @@ func TestHTTPAdapter_InvalidConvertToReturnsBadRequest(t *testing.T) {
 	}
 }
 
-func TestHTTPAdapter_ForwardsRangeHeader(t *testing.T) {
+func TestHTTPAdapter_AppliesRangeOnResponse(t *testing.T) {
 	t.Parallel()
 
-	fileGateway := &testFileGateway{res: out.FileResponse{StatusCode: http.StatusPartialContent, Headers: make(http.Header), Body: io.NopCloser(strings.NewReader("partial"))}}
+	fileGateway := &testFileGateway{res: out.FileResponse{StatusCode: http.StatusOK, Headers: make(http.Header), Body: io.NopCloser(strings.NewReader("0123456789abcdef"))}}
 
 	r := buildHTTPAdapter(
 		&testProxyInfoGateway{res: out.ProxyInfoResponse{StatusCode: http.StatusOK, Body: []byte(`{"fileUrl":"http://upstream/file","fileName":"file.pdf"}`)}},
@@ -314,7 +305,13 @@ func TestHTTPAdapter_ForwardsRangeHeader(t *testing.T) {
 	if rec.Code != http.StatusPartialContent {
 		t.Fatalf("expected status 206, got %d", rec.Code)
 	}
-	if got := fileGateway.lastHeaders["Range"]; got != "bytes=0-10" {
-		t.Fatalf("expected Range forwarded, got %q", got)
+	if got := rec.Header().Get("Content-Range"); got != "bytes 0-10/16" {
+		t.Fatalf("unexpected content-range: %s", got)
+	}
+	if rec.Body.String() != "0123456789a" {
+		t.Fatalf("unexpected partial body: %q", rec.Body.String())
+	}
+	if got := fileGateway.lastHeaders["Range"]; got != "" {
+		t.Fatalf("expected no upstream Range forwarding, got %q", got)
 	}
 }

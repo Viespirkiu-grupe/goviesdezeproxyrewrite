@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	// "github.com/gen2brain/go-unarr"
 	// "github.com/gen2brain/go-unarr"
@@ -119,8 +121,14 @@ func listWith7z(b []byte) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmp.Name())
+		return nil, err
+	}
 	defer os.Remove(tmp.Name())
-	os.WriteFile(tmp.Name(), b, 0644)
+	if err := os.WriteFile(tmp.Name(), b, 0600); err != nil {
+		return nil, err
+	}
 
 	cmd := exec.Command("7z", "l", "-slt", tmp.Name())
 	out, err := cmd.Output()
@@ -129,62 +137,137 @@ func listWith7z(b []byte) ([]string, error) {
 	}
 
 	var files []string
+	var currentPath string
+	inEntry := false
+	isDir := false
+	flushEntry := func() {
+		if currentPath != "" && !isDir {
+			files = append(files, currentPath)
+		}
+		currentPath = ""
+		isDir = false
+	}
+
 	scanner := bufio.NewScanner(bytes.NewReader(out))
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
+		if line == "----------" {
+			inEntry = true
+			flushEntry()
+			continue
+		}
+		if !inEntry {
+			continue
+		}
+		if line == "" {
+			flushEntry()
+			continue
+		}
 		if strings.HasPrefix(line, "Path = ") {
-			p := strings.TrimPrefix(line, "Path = ")
-			if !strings.HasSuffix(p, "/") {
-				files = append(files, p)
-			}
+			currentPath = strings.TrimPrefix(line, "Path = ")
+		}
+		if strings.HasPrefix(line, "Folder = ") {
+			isDir = strings.TrimPrefix(line, "Folder = ") == "+"
 		}
 	}
+	flushEntry()
 	return files, scanner.Err()
 }
+
 func getWith7z(b []byte, filename string) (io.ReadCloser, error) {
 	tmp, err := os.CreateTemp("", "arc-*")
 	if err != nil {
 		return nil, err
 	}
-	os.WriteFile(tmp.Name(), b, 0644)
+	tmpName := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return nil, err
+	}
+	if err := os.WriteFile(tmpName, b, 0600); err != nil {
+		_ = os.Remove(tmpName)
+		return nil, err
+	}
 
 	cmd := exec.Command(
 		"7z", "x",
 		"-so",
-		tmp.Name(),
+		tmpName,
 		filename,
 	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		_ = os.Remove(tmpName)
 		return nil, err
 	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, err
-	}
-	go io.Copy(os.Stderr, stderr)
 
 	if err := cmd.Start(); err != nil {
+		_ = stdout.Close()
+		_ = os.Remove(tmpName)
 		return nil, err
 	}
 
-	return struct {
-		io.Reader
-		io.Closer
-	}{
-		Reader: stdout,
-		Closer: closerFunc(func() error {
-			cmd.Wait()
-			os.Remove(tmp.Name())
-			return nil
-		}),
+	return &sevenZipReadCloser{
+		stdout:  stdout,
+		cmd:     cmd,
+		tmpPath: tmpName,
+		stderr:  &stderr,
 	}, nil
 }
 
 type closerFunc func() error
 
 func (c closerFunc) Close() error { return c() }
+
+type sevenZipReadCloser struct {
+	stdout  io.ReadCloser
+	cmd     *exec.Cmd
+	tmpPath string
+	stderr  *bytes.Buffer
+
+	once     sync.Once
+	closeErr error
+}
+
+func (s *sevenZipReadCloser) Read(p []byte) (int, error) {
+	return s.stdout.Read(p)
+}
+
+func (s *sevenZipReadCloser) Close() error {
+	s.once.Do(func() {
+		var errs []error
+
+		if s.stdout != nil {
+			if err := s.stdout.Close(); err != nil {
+				errs = append(errs, err)
+			}
+		}
+
+		if s.cmd != nil && s.cmd.Process != nil {
+			if err := s.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+				errs = append(errs, err)
+			}
+			if err := s.cmd.Wait(); err != nil {
+				if s.stderr != nil && s.stderr.Len() > 0 {
+					errs = append(errs, fmt.Errorf("7z wait failed: %w: %s", err, strings.TrimSpace(s.stderr.String())))
+				} else {
+					errs = append(errs, fmt.Errorf("7z wait failed: %w", err))
+				}
+			}
+		}
+
+		if err := os.Remove(s.tmpPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, err)
+		}
+
+		s.closeErr = errors.Join(errs...)
+	})
+
+	return s.closeErr
+}
 
 func IdentityFilesV3(archiveBytes []byte) ([]string, error) {
 	format, stream, err := archives.Identify(context.TODO(), "file", bytes.NewReader(archiveBytes))
@@ -196,21 +279,37 @@ func IdentityFilesV3(archiveBytes []byte) ([]string, error) {
 		return nil, fmt.Errorf("formatas %T nepalaiko failų išskleidimo (gali būti, kad tai ne archyvas)", format)
 	}
 	var names []string
-	dir := ""
+	seen := make(map[string]struct{})
 	err = extractor.Extract(context.TODO(), stream, func(ctx context.Context, info archives.FileInfo) error {
 		if info.IsDir() {
-			dir = filepath.Join(dir, info.Name())
 			return nil
 		}
-		names = append(names, filepath.Join(dir, info.Name()))
+		name := normalizeArchivePath(info.Name())
+		if name == "" {
+			return nil
+		}
+		if _, ok := seen[name]; ok {
+			return nil
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
 
 	return names, nil
 }
 
 func GetFileFromArchiveV3(archiveBytes []byte, filename string) (io.ReadCloser, error) {
 	var buf bytes.Buffer
+	target := normalizeArchivePath(filename)
+	targetBase := strings.ToLower(path.Base(target))
+	if target == "" {
+		return nil, fmt.Errorf("failas nerastas: %s", filename)
+	}
+
 	format, stream, err := archives.Identify(context.TODO(), filename, bytes.NewReader(archiveBytes))
 	if err != nil {
 		return nil, fmt.Errorf("nepavyko atidaryti archyvo: %w", err)
@@ -219,13 +318,17 @@ func GetFileFromArchiveV3(archiveBytes []byte, filename string) (io.ReadCloser, 
 	if !ok {
 		return nil, fmt.Errorf("formatas %T nepalaiko failų išskleidimo (gali būti, kad tai ne archyvas)", format)
 	}
-	dir := ""
+	matched := false
 	err = extractor.Extract(context.TODO(), stream, func(ctx context.Context, info archives.FileInfo) error {
 		if info.IsDir() {
-			dir = filepath.Join(dir, info.Name())
 			return nil
 		}
-		if filepath.Join(dir, info.Name()) != filename {
+		entryName := normalizeArchivePath(info.Name())
+		if entryName == "" {
+			return nil
+		}
+
+		if entryName != target && strings.ToLower(path.Base(entryName)) != targetBase {
 			return nil
 		}
 		fh, err := info.Open()
@@ -233,11 +336,33 @@ func GetFileFromArchiveV3(archiveBytes []byte, filename string) (io.ReadCloser, 
 			return fmt.Errorf("nepavyko atidaryti failo %q: %w", filename, err)
 		}
 		defer fh.Close()
-		buf.ReadFrom(fh)
+		if _, err := buf.ReadFrom(fh); err != nil {
+			return fmt.Errorf("nepavyko nuskaityti failo %q: %w", filename, err)
+		}
+		matched = true
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	if !matched {
+		return nil, fmt.Errorf("failas nerastas: %s", filename)
+	}
 	return io.NopCloser(bytes.NewReader(buf.Bytes())), nil
 
+}
+
+func normalizeArchivePath(v string) string {
+	v = strings.ReplaceAll(v, "\\", "/")
+	v = filepath.ToSlash(v)
+	v = strings.TrimSpace(v)
+	v = strings.TrimPrefix(v, "./")
+	v = strings.TrimPrefix(v, "/")
+	v = path.Clean(v)
+	if v == "." {
+		return ""
+	}
+	return v
 }
 
 // GetFileFromZip suranda faile esantį įrašą pagal filename ir grąžina jo turinį kaip io.ReadCloser.
@@ -301,32 +426,33 @@ func ExtractEmlAttachments(in []byte, filename string, idx string) (io.ReadClose
 }
 
 func ConvertMsgToEml(in []byte) ([]byte, error) {
-	file := bytes.NewReader(in)
-	_ = file
-
-	tmpFileName, _ := os.CreateTemp("", "msg-*.msg")
-	defer os.Remove(tmpFileName.Name())
-	// log.Printf("Laikinas MSG failas: %s", tmpFileName.Name())
-	os.WriteFile(tmpFileName.Name(), in, 0755)
-
-	cmd := exec.Command("msgconvert", "--outfile", "-", tmpFileName.Name())
-	stdout, _ := cmd.StdoutPipe()
-	stderr, _ := cmd.StderrPipe()
-	go func() {
-		io.Copy(os.Stderr, stderr)
-	}()
-	var buf bytes.Buffer
-	go func() {
-		io.Copy(&buf, stdout)
-	}()
-	err := cmd.Start()
+	tmpFile, err := os.CreateTemp("", "msg-*.msg")
 	if err != nil {
-		return nil, fmt.Errorf("nepavyko konvertuoti MSG į EML: %w", err)
+		return nil, err
 	}
-	err = cmd.Wait()
-	if err != nil {
-		return nil, fmt.Errorf("nepavyko konvertuoti MSG į EML: %w", err)
+	tmpName := tmpFile.Name()
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return nil, err
+	}
+	defer os.Remove(tmpName)
+
+	if err := os.WriteFile(tmpName, in, 0600); err != nil {
+		return nil, err
 	}
 
-	return buf.Bytes(), nil
+	cmd := exec.Command("msgconvert", "--outfile", "-", tmpName)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		if stderr.Len() > 0 {
+			return nil, fmt.Errorf("nepavyko konvertuoti MSG į EML: %w: %s", err, strings.TrimSpace(stderr.String()))
+		}
+		return nil, fmt.Errorf("nepavyko konvertuoti MSG į EML: %w", err)
+	}
+
+	return stdout.Bytes(), nil
 }

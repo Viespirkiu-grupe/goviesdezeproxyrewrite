@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Viespirkiu-grupe/goviesdezeproxy/pkg/sconv"
+	"github.com/Viespirkiu-grupe/goviesdezeproxyrewrite/pkg/sconv"
 )
 
 func getTimeout() time.Duration {
@@ -73,6 +73,12 @@ func ConvertDocumentReaderToPDF(
 		tmpIn.Name(),
 	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if mu.Load() || cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -88,13 +94,6 @@ func ConvertDocumentReaderToPDF(
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start libreoffice: %w", err)
-	}
-
-	cmd.Cancel = func() error {
-		if mu.Load() == false {
-			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
-		return nil
 	}
 
 	if err := cmd.Wait(); err != nil {

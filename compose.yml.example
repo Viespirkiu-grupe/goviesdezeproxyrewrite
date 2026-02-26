@@ -1,8 +1,8 @@
 services:
-  goviesdezeproxy:
+  goviesdezeproxyrewrite:
     build: .
-    image: ghcr.io/viespirkiu-grupe/goviesdezeproxy:v0.0.2
-    container_name: goviesdezeproxy
+    image: ghcr.io/viespirkiu-grupe/goviesdezeproxyrewrite:v0.0.2
+    container_name: goviesdezeproxyrewrite
     restart: unless-stopped
     env_file:
       - .env

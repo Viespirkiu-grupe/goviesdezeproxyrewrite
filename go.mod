@@ -1,4 +1,4 @@
-module github.com/Viespirkiu-grupe/goviesdezeproxy
+module github.com/Viespirkiu-grupe/goviesdezeproxyrewrite
 
 go 1.25.0
 

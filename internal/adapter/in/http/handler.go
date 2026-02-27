@@ -87,13 +87,8 @@ func (h *Handler) HandleArchive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, readErr := io.ReadAll(result.Body)
-	if readErr != nil {
-		http.Error(w, "failed to read response body", http.StatusBadGateway)
-		return
-	}
-
-	http.ServeContent(w, r, path.Base(result.FileName), time.Time{}, bytes.NewReader(body))
+	w.WriteHeader(result.StatusCode)
+	_, _ = io.Copy(w, result.Body)
 }
 
 func (h *Handler) handleRangeResponse(w http.ResponseWriter, r *http.Request, result *archiveapp.Result) {

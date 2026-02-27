@@ -424,14 +424,11 @@ func TestExecute_DoesNotForwardRangeForConversion(t *testing.T) {
 	}
 }
 
-func TestExecute_RangeUpstream200RefetchesFullBody(t *testing.T) {
+func TestExecute_RangeUpstream200PassesBodyToHandler(t *testing.T) {
 	t.Parallel()
 
 	proxyBody := []byte(`{"fileUrl":"http://example/file","fileName":"report.pdf"}`)
-	fileGateway := &fileGatewayMock{responses: []out.FileResponse{
-		{StatusCode: 200, Headers: make(http.Header), Body: io.NopCloser(bytes.NewReader([]byte("partial-upstream")))},
-		{StatusCode: 200, Headers: make(http.Header), Body: io.NopCloser(bytes.NewReader([]byte("full-upstream-body")))},
-	}}
+	fileGateway := &fileGatewayMock{res: out.FileResponse{StatusCode: 200, Headers: make(http.Header), Body: io.NopCloser(bytes.NewReader([]byte("partial-upstream")))}}
 
 	svc := NewService(
 		&proxyInfoGatewayMock{res: out.ProxyInfoResponse{StatusCode: 200, Body: proxyBody}},
@@ -446,18 +443,15 @@ func TestExecute_RangeUpstream200RefetchesFullBody(t *testing.T) {
 	}
 	defer res.Body.Close()
 
-	if fileGateway.callCount != 2 {
-		t.Fatalf("expected two upstream calls, got %d", fileGateway.callCount)
+	if fileGateway.callCount != 1 {
+		t.Fatalf("expected one upstream call, got %d", fileGateway.callCount)
 	}
 	if got := fileGateway.allHeaders[0]["Range"]; got != "bytes=5-9" {
-		t.Fatalf("expected first call with range, got %q", got)
-	}
-	if got := fileGateway.allHeaders[1]["Range"]; got != "" {
-		t.Fatalf("expected second call without range, got %q", got)
+		t.Fatalf("expected call with range, got %q", got)
 	}
 	b, _ := io.ReadAll(res.Body)
-	if string(b) != "full-upstream-body" {
-		t.Fatalf("unexpected body after refetch: %q", string(b))
+	if string(b) != "partial-upstream" {
+		t.Fatalf("unexpected body: %q", string(b))
 	}
 }
 
@@ -487,14 +481,11 @@ func TestExecute_RawRangeFallbackKeeps200ForHandlerSlicing(t *testing.T) {
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("expected status 200, got %d", res.StatusCode)
 	}
-	if fileGateway.callCount != 2 {
-		t.Fatalf("expected two upstream calls, got %d", fileGateway.callCount)
+	if fileGateway.callCount != 1 {
+		t.Fatalf("expected one upstream call, got %d", fileGateway.callCount)
 	}
 	if got := fileGateway.allHeaders[0]["Range"]; got != "bytes=999-1000" {
-		t.Fatalf("expected first call with range, got %q", got)
-	}
-	if got := fileGateway.allHeaders[1]["Range"]; got != "" {
-		t.Fatalf("expected second call without range, got %q", got)
+		t.Fatalf("expected call with range, got %q", got)
 	}
 	b, _ := io.ReadAll(res.Body)
 	if string(b) != "full-body" {

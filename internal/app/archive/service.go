@@ -131,19 +131,6 @@ func (s *Service) Execute(ctx context.Context, req Request) (*Result, error) {
 	}
 	log.Printf("archive: file status=%d requestedID=%s", fileRes.StatusCode, req.RequestedID)
 
-	if forwardRangeToUpstream && fileRes.StatusCode == http.StatusOK {
-		_ = fileRes.Body.Close()
-		log.Printf("archive: upstream ignored range, refetching full body requestedID=%s", req.RequestedID)
-		fileRes, err = s.file.FetchFile(ctx, info.FileURL, cloneHeaders(info.Headers))
-		if err != nil {
-			if errors.Is(err, context.Canceled) {
-				return nil, err
-			}
-			return nil, &StatusError{Status: 502, Message: "failed to refetch full file"}
-		}
-		log.Printf("archive: refetch file status=%d requestedID=%s", fileRes.StatusCode, req.RequestedID)
-	}
-
 	if fileRes.StatusCode < 200 || fileRes.StatusCode >= 300 {
 		return &Result{
 			StatusCode: fileRes.StatusCode,

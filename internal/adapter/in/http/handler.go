@@ -10,6 +10,7 @@ import (
 	"path"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	archiveapp "github.com/Viespirkiu-grupe/goviesdezeproxyrewrite/internal/app/archive"
@@ -80,9 +81,9 @@ func (h *Handler) HandleArchive(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(w, result.Body)
 		return
 	}
-	if result.StatusCode == http.StatusPartialContent {
-		w.WriteHeader(result.StatusCode)
-		_, _ = io.Copy(w, result.Body)
+
+	if r.Header.Get("Range") != "" {
+		h.handleRangeResponse(w, r, result)
 		return
 	}
 
@@ -93,6 +94,84 @@ func (h *Handler) HandleArchive(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.ServeContent(w, r, path.Base(result.FileName), time.Time{}, bytes.NewReader(body))
+}
+
+func (h *Handler) handleRangeResponse(w http.ResponseWriter, r *http.Request, result *archiveapp.Result) {
+	rng, ok := parseClosedRange(r.Header.Get("Range"))
+	if (result.StatusCode == http.StatusPartialContent || result.StatusCode == http.StatusOK) && ok {
+		expectedLen := rng.end - rng.start + 1
+		if expectedLen > 0 {
+			limited := io.LimitReader(result.Body, expectedLen+1)
+			chunk, err := io.ReadAll(limited)
+			if err != nil {
+				http.Error(w, "failed to read ranged upstream body", http.StatusBadGateway)
+				return
+			}
+			if int64(len(chunk)) == expectedLen {
+				if w.Header().Get("Content-Range") == "" {
+					w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/*", rng.start, rng.end))
+				}
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write(chunk)
+				_, _ = io.Copy(io.Discard, result.Body)
+				return
+			}
+			if int64(len(chunk)) > expectedLen {
+				rest, readErr := io.ReadAll(result.Body)
+				if readErr != nil {
+					http.Error(w, "failed to read full upstream body", http.StatusBadGateway)
+					return
+				}
+				fullBody := make([]byte, 0, len(chunk)+len(rest))
+				fullBody = append(fullBody, chunk...)
+				fullBody = append(fullBody, rest...)
+				w.Header().Del("Content-Range")
+				http.ServeContent(w, r, path.Base(result.FileName), time.Time{}, bytes.NewReader(fullBody))
+				return
+			}
+			http.Error(w, "requested range not satisfiable", http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+	}
+
+	body, readErr := io.ReadAll(result.Body)
+	if readErr != nil {
+		http.Error(w, "failed to read response body", http.StatusBadGateway)
+		return
+	}
+	http.ServeContent(w, r, path.Base(result.FileName), time.Time{}, bytes.NewReader(body))
+}
+
+type closedRange struct {
+	start int64
+	end   int64
+}
+
+func parseClosedRange(v string) (closedRange, bool) {
+	v = strings.TrimSpace(v)
+	if !strings.HasPrefix(v, "bytes=") {
+		return closedRange{}, false
+	}
+	parts := strings.Split(strings.TrimPrefix(v, "bytes="), ",")
+	if len(parts) != 1 {
+		return closedRange{}, false
+	}
+	se := strings.Split(strings.TrimSpace(parts[0]), "-")
+	if len(se) != 2 || se[0] == "" || se[1] == "" {
+		return closedRange{}, false
+	}
+	start, err := strconv.ParseInt(se[0], 10, 64)
+	if err != nil {
+		return closedRange{}, false
+	}
+	end, err := strconv.ParseInt(se[1], 10, 64)
+	if err != nil {
+		return closedRange{}, false
+	}
+	if start < 0 || end < start {
+		return closedRange{}, false
+	}
+	return closedRange{start: start, end: end}, true
 }
 
 func resolveRequestedID(id, dokID, fileID string) (string, error) {

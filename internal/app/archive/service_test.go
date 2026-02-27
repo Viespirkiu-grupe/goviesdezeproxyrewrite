@@ -358,6 +358,64 @@ func TestExecute_UsesProxyInfoHeadersForUpstream(t *testing.T) {
 	}
 }
 
+func TestExecute_ForwardsContentLengthForRawPassthrough(t *testing.T) {
+	t.Parallel()
+
+	proxyBody := []byte(`{"fileUrl":"http://example/file","fileName":"report.pdf"}`)
+	fileGateway := &fileGatewayMock{res: out.FileResponse{
+		StatusCode: 200,
+		Headers:    http.Header{"Content-Length": []string{"1234"}},
+		Body:       io.NopCloser(bytes.NewReader([]byte("body"))),
+	}}
+
+	svc := NewService(
+		&proxyInfoGatewayMock{res: out.ProxyInfoResponse{StatusCode: 200, Body: proxyBody}},
+		fileGateway,
+		&archiveGatewayMock{},
+		&conversionGatewayMock{},
+	)
+
+	res, err := svc.Execute(context.Background(), Request{RequestedID: "123"})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	defer res.Body.Close()
+
+	if got := res.ForwardContentLength; got != "1234" {
+		t.Fatalf("expected content-length 1234, got %q", got)
+	}
+}
+
+func TestExecute_DoesNotForwardContentLengthForConversion(t *testing.T) {
+	t.Parallel()
+
+	proxyBody := []byte(`{"fileUrl":"http://example/file","fileName":"report.png"}`)
+	fileGateway := &fileGatewayMock{res: out.FileResponse{
+		StatusCode: 200,
+		Headers:    http.Header{"Content-Length": []string{"9999"}},
+		Body:       io.NopCloser(bytes.NewReader([]byte("raw"))),
+	}}
+
+	svc := NewService(
+		&proxyInfoGatewayMock{res: out.ProxyInfoResponse{StatusCode: 200, Body: proxyBody}},
+		fileGateway,
+		&archiveGatewayMock{},
+		&conversionGatewayMock{convertFn: func(_ context.Context, _ io.Reader, _ string, _ string) (io.ReadCloser, string, string, error) {
+			return io.NopCloser(bytes.NewReader([]byte("converted"))), "report.webp", "image/webp", nil
+		}},
+	)
+
+	res, err := svc.Execute(context.Background(), Request{RequestedID: "123", ConvertTo: "webp"})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	defer res.Body.Close()
+
+	if got := res.ForwardContentLength; got != "" {
+		t.Fatalf("expected empty forwarded content-length, got %q", got)
+	}
+}
+
 func TestExecute_ForwardsRangeForRawPassthrough(t *testing.T) {
 	t.Parallel()
 

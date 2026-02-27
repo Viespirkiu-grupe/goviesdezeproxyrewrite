@@ -241,6 +241,25 @@ func TestHTTPAdapter_MD5RouteUsesIDParam(t *testing.T) {
 	}
 }
 
+func TestHTTPAdapter_ForwardsContentLengthHeader(t *testing.T) {
+	t.Parallel()
+
+	r := buildHTTPAdapter(
+		&testProxyInfoGateway{res: out.ProxyInfoResponse{StatusCode: http.StatusOK, Body: []byte(`{"fileUrl":"http://upstream/file","fileName":"a.txt"}`)}},
+		&testFileGateway{res: out.FileResponse{StatusCode: http.StatusOK, Headers: http.Header{"Content-Length": []string{"2"}}, Body: io.NopCloser(strings.NewReader("ok"))}},
+		&testArchiveGateway{},
+		&testConversionGateway{},
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/123", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("Content-Length"); got != "2" {
+		t.Fatalf("expected content-length 2, got %q", got)
+	}
+}
+
 func TestHTTPAdapter_PathFileZeroStreamsRawFile(t *testing.T) {
 	t.Parallel()
 

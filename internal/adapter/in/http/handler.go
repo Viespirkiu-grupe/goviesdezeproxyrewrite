@@ -70,6 +70,9 @@ func (h *Handler) HandleArchive(w http.ResponseWriter, r *http.Request) {
 	if result.CacheControl != "" {
 		w.Header().Set("Cache-Control", result.CacheControl)
 	}
+	if result.ForwardContentLength != "" {
+		w.Header().Set("Content-Length", result.ForwardContentLength)
+	}
 	if result.ForwardAcceptRange != "" {
 		w.Header().Set("Accept-Ranges", result.ForwardAcceptRange)
 	}

@@ -28,13 +28,14 @@ type Request struct {
 }
 
 type Result struct {
-	StatusCode          int
-	Body                io.ReadCloser
-	ContentType         string
-	FileName            string
-	CacheControl        string
-	ForwardAcceptRange  string
-	ForwardContentRange string
+	StatusCode           int
+	Body                 io.ReadCloser
+	ContentType          string
+	FileName             string
+	CacheControl         string
+	ForwardContentLength string
+	ForwardAcceptRange   string
+	ForwardContentRange  string
 }
 
 type StatusError struct {
@@ -224,13 +225,14 @@ func (s *Service) Execute(ctx context.Context, req Request) (*Result, error) {
 	}
 
 	return &Result{
-		StatusCode:          fileRes.StatusCode,
-		Body:                body,
-		ContentType:         contentType,
-		FileName:            name,
-		CacheControl:        "public, max-age=2592000, immutable",
-		ForwardAcceptRange:  forwardedAcceptRanges(fileRes.StatusCode, fileRes.Headers.Get("Accept-Ranges")),
-		ForwardContentRange: forwardedContentRange(fileRes.StatusCode, fileRes.Headers.Get("Content-Range")),
+		StatusCode:           fileRes.StatusCode,
+		Body:                 body,
+		ContentType:          contentType,
+		FileName:             name,
+		CacheControl:         "public, max-age=2592000, immutable",
+		ForwardContentLength: forwardedContentLength(fileRes.StatusCode, fileRes.Headers.Get("Content-Length"), requiresExtraction, requiresConversion),
+		ForwardAcceptRange:   forwardedAcceptRanges(fileRes.StatusCode, fileRes.Headers.Get("Accept-Ranges")),
+		ForwardContentRange:  forwardedContentRange(fileRes.StatusCode, fileRes.Headers.Get("Content-Range")),
 	}, nil
 }
 
@@ -333,6 +335,16 @@ func forwardedAcceptRanges(status int, value string) string {
 		return value
 	}
 	return ""
+}
+
+func forwardedContentLength(status int, value string, extracted bool, converted bool) string {
+	if extracted || converted {
+		return ""
+	}
+	if status < 200 || status >= 300 {
+		return ""
+	}
+	return value
 }
 
 func forwardedContentRange(status int, value string) string {

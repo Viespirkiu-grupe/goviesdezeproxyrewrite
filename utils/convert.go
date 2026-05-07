@@ -48,6 +48,9 @@ func ConvertDocumentReaderToPDF(
 ) error {
 	semaphoreDoc <- struct{}{}
 	defer func() { <-semaphoreDoc }()
+	userProfileDir, _ := os.MkdirTemp("", "lo-profile-*")
+	defer os.RemoveAll(userProfileDir)
+
 	tmpIn, err := os.CreateTemp("", "archive-*")
 	if err != nil {
 		return err
@@ -67,6 +70,7 @@ func ConvertDocumentReaderToPDF(
 	cmd := exec.CommandContext(
 		ctx,
 		"libreoffice",
+		"-env:UserInstallation=file://"+userProfileDir, // Izoliuotas profilis
 		"--headless",
 		"--convert-to", "pdf",
 		"--outdir", outDir,
